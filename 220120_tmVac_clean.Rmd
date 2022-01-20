@@ -1,0 +1,892 @@
+---
+title: "220120_tmVac_clean"
+output: html_notebook
+---
+
+```{r}
+print(Sys.time())
+```
+
+# Premessa used for pre-processing, and panel editing
+quoted out after initial use
+```{r}
+#suppressMessages(library(premessa))
+#paneleditor_GUI()
+```
+
+#### Define working directory
+```{r setup, include=FALSE}
+#This need to be set to where the FCS files are
+knitr::opts_knit$set(root.dir = '~/Desktop/')
+```
+
+#### Load required packages
+```{r}
+library(readxl)
+library(cowplot)
+library(CATALYST)
+library(diffcyt)
+library(ggplot2) 
+library(flowCore)
+library(reshape)
+library(ggrepel)
+library(premessa)
+library(flowCore)
+library(CytoSpill)
+library(plyr)
+library(ggpubr)
+library(MASS)
+library(pheatmap)
+library(rstatix)
+library(ggrastr)
+library(RColorBrewer)
+library(viridis)
+```
+
+```{r}
+sessionInfo()
+```
+
+#### Define the seed for the entire workflow
+```{r}
+my_seed <- 1234
+set.seed(my_seed)
+```
+
+### import fcs files as a flowset
+```{r}
+fcs_files <- list.files(pattern = ".fcs$")
+fs <- read.flowSet(fcs_files, transformation = FALSE, truncate_max_range = FALSE)
+fs
+fcs_files
+```
+
+### import metadata
+```{r}
+md <- read_excel("Totalcell_metadata.xlsx")                                  
+md
+```
+
+### import panel data
+```{r}
+panel <- "Totalcell_panel.xlsx"                           
+panel <- read_excel(panel)
+panel 
+```
+
+```{r}
+# spot check that all panel columns are in the flowSet object
+all(panel$fcs_colname %in% colnames(fs))  
+```
+
+
+### Build the SingleCellExperiment from the fcs files, metadata, and panel information
+```{r}
+sce <- prepData(fs, panel, md)
+```
+
+## conduct FlowSOM clustering on the WBC level
+```{r}
+set.seed(my_seed)
+sce <- cluster(sce, 
+               features = "type",
+               xdim = 10,
+               ydim = 10,
+               maxK = 30,
+               verbose = FALSE, 
+               seed = my_seed)   
+set.seed(my_seed)
+```
+
+## Number of cells measured per sample
+```{r, fig.width = 5, fig.height = 2}
+plotCounts(sce, 
+    group_by = "sample_id", 
+    color_by = "condition")
+```
+
+## Heatmap of aggregated marker expressions
+```{r fig.width = 5}
+plotExprHeatmap(sce, 
+                features = "type",
+                by = "cluster_id", 
+                k = "meta20", 
+                m = "meta10",
+                scale = "first", 
+                q = 0.01, 
+                perc = T, 
+                col_dend = F, 
+                bars = T)
+```
+
+## Dimensionality reduction (UMAP)
+```{r}
+set.seed(my_seed)
+sce <- runDR(sce, 
+             dr = "UMAP", 
+             cells = 1000, 
+             features = "type",
+             n_neighbors = 10) 
+set.seed(my_seed)
+```
+
+### plot the results coloured by metadata and clustering
+```{r, fig.height=4, fig.width=6}
+plot_grid(ncol = 2,
+  (plotDR(sce, dr = "UMAP", color_by = "patient_id")),
+  (plotDR(sce, dr = "UMAP", color_by = "condition")),
+  (plotDR(sce, dr = "UMAP", color_by = "sample_id")),
+  (plotDR(sce, dr = "UMAP", color_by = "meta20"))
+  )
+```
+
+## Highlight specific markers expression on the UMAP
+```{r, fig.height=6, fig.width=8}
+#plotting only type markers
+plotDR(sce, 
+       dr = "UMAP", 
+       color_by = type_markers(sce),
+       ncol =6,
+       scale = T # set to false if you want to display the unscaled data
+       )
+```
+
+```{r, fig.height=6, fig.width=8}
+#plotting only state markers
+plotDR(sce, 
+       dr = "UMAP", 
+       color_by = state_markers(sce),
+       ncol =6,
+       scale = T # set to false if you want to display the unscaled data
+       )
+```
+
+## Merging of clusters into specific cell types
+Note! You have to manually make the merging table based on the above clustering
+```{r}
+merging_table <- read_excel("merging_table1.xlsx")                             
+merging_table 
+sce <- mergeClusters(sce, k = "meta20", table = merging_table, id = "merging1", overwrite = T)
+```
+
+#### Check how your cell type decisions look on the UMAP
+```{r, fig.height=4, fig.width=6}
+plot_grid(ncol = 2,
+  (plotDR(sce, dr = "UMAP", color_by = "meta20")),
+  (plotDR(sce, dr = "UMAP", color_by = "merging1"))
+  )
+```
+
+
+### plot clusters over the time-course
+```{r, fig.width=5, fig.height=2.5}
+g = plotAbundances(sce, k = "merging1", by = "sample_id", group_by = "condition")
+df = g$data
+df$condition = as.factor(df$condition)
+df$cluster_id = as.factor(df$cluster_id)
+
+# Multiple line plot
+g2 = ggplot(df, aes(x = condition, y = Freq, group = cluster_id)) +
+  stat_summary(fun=median, geom="line", size = 1.5, alpha = 0.7, color = "black") +
+  stat_summary(fun=median, geom="line", size = 1.1, alpha = 1, aes(color = cluster_id)) +
+  geom_point(aes(fill = cluster_id), size = 1, alpha = 0.6, color = "black", shape = 21) +
+  facet_wrap(~cluster_id, ncol = 4, scales = "free") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5))
+g2
+```
+
+### UMAP density plot
+```{r, fig.height=3,fig.width=4}
+p =　plotDR(sce, dr = "UMAP", color_by = "merging1", facet_by = "condition")
+p + stat_density_2d(geom = "polygon", contour = TRUE,
+      aes(fill = after_stat(level)), colour = "black",
+      bins = 8) +
+      scale_fill_distiller(palette = "Blues", direction = 1) +
+      theme_classic()
+```
+
+```{r, fig.height=3,fig.width=4}
+#UMAP density plot (nlevel for scaling each plot individually)
+p =　plotDR(sce, dr = "UMAP", color_by = "merging1", facet_by = "condition")
+pp = p + stat_density_2d(geom = "polygon", contour = TRUE,
+      aes(fill = after_stat(nlevel)), colour = "black", size = 0.1, alpha = 0.8,
+      bins = 12) +
+      scale_fill_distiller(palette = "Spectral", direction = -1) +
+      theme_classic()
+pp
+```
+
+
+#### Add the info about cell types to the metadata
+```{r}
+df = as.data.frame(sce@colData$cluster_id)
+lookup = sce@metadata$cluster_codes
+new <- df  # create a copy of df
+
+# using lapply, loop over columns and match values to the look up table. store in "new".
+new[] <- lapply(df, function(x) lookup$merging1[match(x, lookup$som100)])
+sce$merging1 = new$`sce@colData$cluster_id`
+```
+
+Now we can facet by the new cell type clusters and plot other types of graphs
+```{r}
+plotDR(sce, dr = "UMAP", color_by = "merging1",facet_by = "merging1")
+```
+
+```{r, fig.height=3, fig.width = 3}
+plotAbundances(sce, k = "merging1", by = "sample_id", group_by = "condition")
+```
+
+
+### APC re-clustering
+```{r}
+sce_APC = filterSCE(sce, cluster_id %in% c("mono+DC"), k = "merging1")
+rowData(sce_APC)$marker_class = "state"
+rowData(sce_APC[c(marker_list1)])$marker_class = "type" 
+```
+
+```{r}
+set.seed(my_seed)
+sce_APC <- cluster(sce_APC, 
+               features = "type",
+               xdim = 10,
+               ydim = 10,
+               maxK = 30,
+               verbose = FALSE, 
+               seed = my_seed)   
+set.seed(my_seed)
+```
+
+```{r}
+set.seed(my_seed)
+sce_APC = runDR(sce_APC, 
+                  dr = "UMAP", 
+                  cells = 1000, 
+                  features = type_markers(sce_APC),
+                  n_neighbors = 30,
+                  repulsion_strength = 1,
+                  scale = T
+                  ) 
+set.seed(my_seed)
+```
+
+```{r, fig.height=4}
+plot_grid(ncol=3,
+plotDR(sce_APC, dr = "UMAP", color_by = "meta10"),
+plotDR(sce_APC, dr = "UMAP", color_by = "meta15"),
+plotDR(sce_APC, dr = "UMAP", color_by = "meta20")
+)
+```
+
+```{r, fig.height=4, fig.width=8}
+plotDR(sce_APC, 
+       dr = "UMAP", 
+       color_by = type_markers(sce_APC),
+       ncol =5,
+       scale = T
+       )
+```
+
+```{r, fig.height=4, fig.width=8}
+plotDR(sce_APC, 
+       dr = "UMAP", 
+       color_by = state_markers(sce_APC),
+       ncol =9,
+       scale = T
+       )
+```
+
+```{r}
+merging_table <- read_excel("merging_table_myelo.xlsx")                             
+merging_table 
+sce_APC <- mergeClusters(sce_APC, k = "meta10", table = merging_table, id = "merging_myelo", overwrite = T)
+```
+
+#### Check how your cell type decisions look on the UMAP
+```{r, fig.height=4, fig.width=6}
+plot_grid(ncol = 2,
+  (plotDR(sce_APC, dr = "UMAP", color_by = "meta10")),
+  (plotDR(sce_APC, dr = "UMAP", color_by = "merging_myelo"))
+  )
+```
+
+#### Filtering away DCs
+```{r}
+sce_mono <- filterSCE(sce_APC, k = "meta10", !cluster_id %in% c(5,6))
+```
+
+### monocyte re-clustering
+```{r}
+rowData(sce_mono)$marker_class = "state"
+rowData(sce_mono[c(moi2)])$marker_class = "type"
+```
+
+```{r}
+set.seed(my_seed)
+sce_mono <- cluster(sce_mono, 
+               features = "type",
+               xdim = 10,
+               ydim = 10,
+               maxK = 30,
+               verbose = FALSE, 
+               seed = my_seed)   
+set.seed(my_seed)
+```
+
+```{r fig.width = 5}
+ph = plotExprHeatmap(sce_mono, 
+                features = "type",
+                by = "cluster_id", 
+                k = "meta20", 
+                m = "meta10",
+                scale = "first", 
+                q = 0.01, 
+                perc = T, 
+                col_dend = F, 
+                bars = T)
+ph
+```
+
+```{r}
+set.seed(my_seed)
+sce_mono = runDR(sce_mono, 
+                  dr = "UMAP", 
+                  cells = 1000, 
+                  features = type_markers(sce_mono),
+                  n_neighbors = 30,
+                  scale = T
+                  ) 
+set.seed(my_seed)
+```
+
+## Merging of clusters into specific cell types
+Note! You have to manually make the merging table based on the above clustering
+```{r}
+merging_table <- read_excel("merging_table2.xlsx")                             
+merging_table 
+sce_mono <- mergeClusters(sce_mono, k = "meta15", table = merging_table, id = "merging2", overwrite = T)
+```
+
+#### Check how your cell type decisions look on the UMAP
+```{r, fig.height=4, fig.width=6}
+plot_grid(ncol = 2,
+  (plotDR(sce_mono, dr = "UMAP", color_by = "meta10")),
+  (plotDR(sce_mono, dr = "UMAP", color_by = "merging2"))
+  )
+```
+
+#### Add the info about cell types to the metadata
+```{r}
+df = as.data.frame(sce_mono@colData$cluster_id)
+lookup = sce_mono@metadata$cluster_codes
+new <- df  # create a copy of df
+new[] <- lapply(df, function(x) lookup$merging2[match(x, lookup$som100)])
+sce_mono$merging2 = new$`sce_mono@colData$cluster_id`
+```
+
+
+#### plot the UMAP
+```{r}
+scCol = c("#E67D72", "#A1A333", "#54BA81")
+p = plotDR(sce_mono, dr = "UMAP", color_by = "merging2") +   
+  scale_color_manual(values = scCol, name = "subset") +
+    theme_minimal(base_size = 14)
+p
+```
+
+#### rasterize the plot
+```{r}
+ppp = ggplot(p$data, aes(x, y, colour = merging2, fill = merging2)) +
+  geom_point_rast(aes(x, y, colour = merging2, fill = merging2), size =0.3, alpha = 0.8) +
+  scale_color_manual(values = scCol, name = "subset") +
+  theme_minimal(base_size = 14) + 
+  labs(y="UMAP dim1",x = "UMAP dim2") + 
+  guides(fill=guide_legend(title="cell types"), colour=guide_legend(title="cell types", override.aes = list(size=5)))
+  
+  ppp
+```
+
+```{r}
+myPalette <- colorRampPalette(viridis(11))
+
+p = plotDR(sce_mono, dr = "UMAP", color_by = "CD14") +   
+    theme_minimal(base_size = 14)
+p
+p2 = ggplot(p$data, aes(x, y, colour = value, fill = value)) +
+  geom_point_rast(aes(x, y, colour = value, fill = value), size =0.3, alpha = 0.8) +
+  theme_minimal(base_size = 14) + 
+  scale_colour_gradientn(colours = myPalette(100), limits=c(0, 1)) +
+  labs(y="UMAP dim1",x = "UMAP dim2") + 
+  guides(fill=guide_legend(title="CD14 scaled"), colour=guide_legend(title="CD14 scaled", override.aes = list(size=5)))
+  
+p2
+```
+
+```{r}
+p = plotDR(sce_mono, dr = "UMAP", color_by = "CD16") +   
+    theme_minimal(base_size = 14)
+p
+p3 = ggplot(p$data, aes(x, y, colour = value, fill = value)) +
+  geom_point_rast(aes(x, y, colour = value, fill = value), size =0.3, alpha = 0.8) +
+  theme_minimal(base_size = 14) + 
+  scale_colour_gradientn(colours = myPalette(100), limits=c(0, 1)) +
+  labs(y="UMAP dim1",x = "UMAP dim2") + 
+  guides(fill=guide_legend(title="CD16 scaled"), colour=guide_legend(title="CD16 scaled", override.aes = list(size=5)))
+  
+p3
+```
+
+```{r, fig.width=6, fig.height=1.5}
+plot_grid(ncol=2, p2,p3)
+```
+
+### norm to PBMC%
+```{r}
+sce_PBMC = filterSCE(sce, cluster_id %in% c("B cells", "CD4 T", "CD8 T", "gdT", "Myeloid", "NK cells", "pDC"), k = "merging1")
+```
+
+#### extract count data
+```{r}
+x = sce_mono
+shape_by = "sample_id"
+group_by = "condition"
+
+ns <- table(
+      cluster_id = x$merging2, 
+      sample_id = sample_ids(x))
+
+df <- as.data.frame(ns)
+    
+# add relevant cell metadata
+m <- match(df$sample_id, x$sample_id)
+for (i in c(shape_by, group_by))
+        df[[i]] <- x[[i]][m]
+```
+
+#### extract total PBMC count per sample_id
+```{r}
+df_tot = data.frame(sce_PBMC[["sample_id"]]) # this makes a table for each cell with the available sample ID
+y <- table(df_tot) # this sums up the occurrences of each ID. It is thus the actual cell count
+df_tot <- data.frame(value = c(y)) #these two lines generates the data frame again to be used for ggplot
+df_tot[["sample_id"]] <- rownames(y)
+```
+
+#### merge them
+```{r}
+df_merge = merge(df, df_tot, by = "sample_id")
+```
+
+#### add column with percentage of total PBMC
+```{r}
+df_merge$PBMC_norm = df_merge$Freq/df_merge$value*100
+```
+
+#### plot PBMC norm percentage
+```{r, fig.width=5, fig.height=1.5}
+g2 = ggplot(df_merge, aes(x = condition, y = PBMC_norm, group = cluster_id)) +
+  stat_summary(fun=median, geom="line", size = 1.5, alpha = 0.7, color = "black") +
+  stat_summary(fun=median, geom="line", size = 1.1, alpha = 1, aes(color = cluster_id)) +
+  geom_point(aes(fill = cluster_id), size = 1, alpha = 0.6, color = "black", shape = 21) +
+    facet_wrap(~cluster_id, ncol = 3, scales = "free") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5))
+g2 + expand_limits(y=0)
+```
+### stats
+```{r}
+#first subset to one cell type
+df_merge_sub = subset(df_merge, cluster_id == "cMono")
+
+# paired t test
+stat.test <- pairwise_t_test(PBMC_norm ~ condition, data = df_merge_sub, paired = TRUE, p.adjust.method = "none") 
+stat.test
+```
+
+```{r}
+#narrow down to the test that should be displayed
+stat.test_sub = stat.test[c(1,16),]
+stat.test_sub
+```
+
+```{r, fig.width=5, fig.height=1.5}
+g1 = ggplot(df_merge_sub, aes(x = condition, y = PBMC_norm, group = cluster_id)) +
+  stat_summary(fun=median, geom="line", size = 1.5, alpha = 0.7, color = "black") +
+  stat_summary(fun=median, geom="line", size = 1.1, alpha = 1, color = scCol[1]) +
+  geom_point(fill = scCol[1], size = 1, alpha = 0.6, color = "black", shape =21) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5)) + 
+  expand_limits(y=c(0, max(df_merge_sub$PBMC_norm)+5)) +
+  stat_pvalue_manual(stat.test_sub, label = "p.adj.signif", y.position = c(max(df_merge_sub$PBMC_norm)+3, max(df_merge_sub$PBMC_norm)+3)) +
+  ggtitle("cMono") +
+  ylab("% of PBMCs") +
+  theme_minimal(base_size = 14) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+g1
+```
+
+```{r}
+#first subset to one cell type
+df_merge_sub = subset(df_merge, cluster_id == "ncMono")
+
+# paired t test
+stat.test <- pairwise_t_test(PBMC_norm ~ condition, data = df_merge_sub, paired = TRUE, p.adjust.method = "none") 
+stat.test
+```
+
+```{r}
+#narrow down to the test that should be displayed
+stat.test_sub = stat.test[c(1,16),]
+stat.test_sub
+```
+
+```{r, fig.width=5, fig.height=1.5}
+g2 = ggplot(df_merge_sub, aes(x = condition, y = PBMC_norm, group = cluster_id)) +
+  stat_summary(fun=median, geom="line", size = 1.5, alpha = 0.7, color = "black") +
+  stat_summary(fun=median, geom="line", size = 1.1, alpha = 1, color = scCol[3]) +
+  geom_point(fill = scCol[3], size = 1, alpha = 0.6, color = "black", shape =21) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5)) + 
+  expand_limits(y=c(0, max(df_merge_sub$PBMC_norm)+1)) +
+  stat_pvalue_manual(stat.test_sub, label = "p.adj.signif", y.position = c(max(df_merge_sub$PBMC_norm)+0.5, max(df_merge_sub$PBMC_norm)+0.5)) +
+  ggtitle("ncMono") +
+  ylab("% of PBMCs") +
+  theme_minimal(base_size = 14) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+g2
+```
+
+```{r}
+#first subset to one cell type
+df_merge_sub = subset(df_merge, cluster_id == "intMono")
+
+# paired t test
+stat.test <- pairwise_t_test(PBMC_norm ~ condition, data = df_merge_sub, paired = TRUE, p.adjust.method = "none") 
+stat.test
+```
+
+```{r}
+#narrow down to the test that should be displayed
+stat.test_sub = stat.test[c(1,16),]
+stat.test_sub
+```
+
+```{r, fig.width=5, fig.height=1.5}
+g3 = ggplot(df_merge_sub, aes(x = condition, y = PBMC_norm, group = cluster_id)) +
+  stat_summary(fun=median, geom="line", size = 1.5, alpha = 0.7, color = "black") +
+  stat_summary(fun=median, geom="line", size = 1.1, alpha = 1, color = scCol[2]) +
+  geom_point(fill = scCol[2], size = 1, alpha = 0.6, color = "black", shape =21) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5)) + 
+  expand_limits(y=c(0, max(df_merge_sub$PBMC_norm)+0.3)) +
+  stat_pvalue_manual(stat.test_sub, label = "p.adj.signif", y.position = c(max(df_merge_sub$PBMC_norm)+0.2, max(df_merge_sub$PBMC_norm)+0.2)) +
+  ggtitle("intMono") +
+  ylab("% of PBMCs") +
+  theme_minimal(base_size = 14) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+g3
+```
+
+
+
+
+```{r}
+plot_grid(ncol=3, g1, g2, g3)
+```
+
+### Feature of interest over time
+```{r}
+test1  = as.data.frame(t(sce_mono@assays@data$exprs))
+test1$sample_id = sce_mono$sample_id
+test1$condition = sce_mono$condition
+test1$patient_id = sce_mono$patient_id
+test1$cluster_id = sce_mono$merging2
+test1$combo_id = paste0(test1$sample_id, "_", test1$cluster_id)
+test2 = ddply(test1, .(combo_id), summarize,  HLADR_mean=mean(get("HLA-DR")))
+```
+
+```{r}
+marker_list = rownames(sce)
+marker_list_mean = c()
+  for (i in 1:length(marker_list)) {
+  marker_list_mean[i] = paste(marker_list[i], "mean",sep="_")
+  }
+```
+
+```{r}
+test4 = data.frame(combo_id = test2$combo_id) 
+
+for(i in c(1:length(marker_list))) {
+  nam = paste0("ttest",i) 
+  nam2 = marker_list[i]
+    g = ddply(test1, .(combo_id), summarize, mean((get(nam2))))
+  assign(nam, g)
+  new <- rep(i, nrow(test4))
+  test4[ , ncol(test4) + 1] <- g[2] 
+}
+```
+
+```{r}
+colnames(test4) = c("combo_id", marker_list_mean)
+```
+
+```{r}
+test3 = merge(test4, test1, by = "combo_id")
+test3 = test3[!duplicated(test3$combo_id),]
+test3
+```
+
+```{r}
+test3$combo_id2 = paste0(test3$condition, "_", test3$cluster_id)
+```
+
+
+```{r}
+for(i in c(1:length(marker_list))) {
+df_sub = test3[,c(1,i+1,88:92)]
+nam = paste0("df_list_",i) 
+assign(nam, melt(df_sub))
+}
+```
+
+```{r}
+#making a list of lists.
+df_list_list = list()
+for(i in c(1:length(marker_list))) {
+  df_list_list[i] = list(get(paste0("df_list_",i)))
+}
+```
+
+```{r, fig.width=5, fig.height=1.5}
+for(i in c(1:length(marker_list))) {
+  nam = paste0("g",i) 
+  ggg = ggplot(data = df_list_list[[i]],
+    aes(x = condition, y = value, group = cluster_id)) +
+    stat_summary(fun=median, geom="line", size = 1.5, alpha = 0.7, color = "black") +
+    stat_summary(fun=median, geom="line", size = 1.1, alpha = 1, aes(color = cluster_id)) +
+    geom_point(aes(fill = cluster_id), size = 1, alpha = 0.6, color = "black", shape = 21) +
+    facet_wrap(~cluster_id, ncol = 3, scales = "free") +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5))+ 
+    expand_limits(y=c(0, 0.5))  +
+    labs(y=paste(marker_list_mean[i], "expression"), x = "")
+  
+  assign(nam, ggg)
+}
+```
+
+```{r}
+#making a list of lists.
+g_list = list()
+for(i in c(1:length(marker_list))) {
+  g_list[i] = list(get(paste0("g",i)))
+}
+```
+
+
+```{r, fig.width=24, fig.height=8}
+gridExtra::grid.arrange(grobs = g_list)
+```
+
+
+
+## make a graph with stats instead of curves
+It is not possible to run stats_summary + stat_compare_means together, as they depend on different groups. So can only make a plot of the median line (stats summary) or one with the statistical significance (stat compare means). facetting is ok!
+
+```{r, fig.width=5, fig.height=1.5}
+my_comparisons <- list(c("day00", "day01"), c("day20", "day22"))
+
+for(i in c(1:length(marker_list))) {
+  nam = paste0("g",i) 
+  ggg = ggplot(data = df_list_list[[i]],
+    aes(x = condition, y = value, group = condition)) +
+    geom_point(aes(fill = cluster_id), size = 1, alpha = 0.6, color = "black", shape = 21) +
+    facet_wrap(~cluster_id, ncol = 3, scales = "free") +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5))+ 
+    expand_limits(y=c(0, 0.5))  +
+    labs(y=paste(marker_list_mean[i], "expression"), x = "")
+  
+    gggg = ggg + stat_compare_means(aes(group = condition), comparisons = my_comparisons, method = "t.test", paired = T, label = "p.signif", vjust = 0.6)
+
+  assign(nam, gggg)
+}
+```
+
+```{r}
+#making a list of lists.
+g_list = list()
+for(i in c(1:length(marker_list))) {
+  g_list[i] = list(get(paste0("g",i)))
+}
+```
+
+```{r, fig.width=24, fig.height=8}
+gridExtra::grid.arrange(grobs = g_list)
+```
+
+
+### Make select marker graphs with cell types next to eachother and paired t test
+```{r}
+test4 = data.frame(combo_id = test2$combo_id) 
+
+for(i in c(1:length(marker_list))) {
+  nam = paste0("ttest",i) 
+  nam2 = marker_list[i]
+    g = ddply(test1, .(combo_id), summarize, mean((get(nam2))))
+  assign(nam, g)
+  new <- rep(i, nrow(test4))
+  test4[ , ncol(test4) + 1] <- g[2] 
+}
+```
+
+#### rename marker list items 
+```{r}
+marker_list_mean
+marker_list_mean[2] = "markoi1" #marker of interest
+marker_list_mean[5] = "markoi2"
+marker_list_mean[6] = "markoi3"
+```
+
+
+```{r}
+colnames(test4) = c("combo_id", marker_list_mean)
+```
+
+
+```{r}
+test3 = merge(test4, test1, by = "combo_id")
+
+test3 = test3[!duplicated(test3$combo_id),]
+test3
+```
+
+
+
+
+```{r}
+#first subset to one cell type
+df_merge_sub = subset(test3, cluster_id == "cMono")
+#df_merge_sub = df_merge_sub[,c(3,88:91)]
+
+# paired t test
+stat.test <- pairwise_t_test(markoi1 ~ condition, data = df_merge_sub, paired = TRUE, p.adjust.method = "none") 
+stat.test
+```
+
+```{r}
+#narrow down to the test that should be displayed
+stat.test_sub = stat.test[c(1,16),]
+stat.test_sub
+```
+
+```{r, fig.width=5, fig.height=1.5}
+g1 = ggplot(df_merge_sub, aes(x = condition, y = markoi1, group = cluster_id)) +
+  stat_summary(fun=median, geom="line", size = 1.5, alpha = 0.7, color = "black") +
+  stat_summary(fun=median, geom="line", size = 1.1, alpha = 1, color = scCol[1]) +
+  geom_point(fill = scCol[1], size = 1, alpha = 0.6, color = "black", shape =21) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5)) + 
+  expand_limits(y=c(0, max(df_merge_sub$markoi1)+0.1)) +
+  stat_pvalue_manual(stat.test_sub, label = "p.adj.signif", y.position = c(max(df_merge_sub$markoi1)+0.05, max(df_merge_sub$markoi1)+0.05)) +
+  ggtitle("cMono") +
+  #ylab("% of PBMCs") +
+  theme_minimal(base_size = 14) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+g1
+```
+
+```{r}
+#first subset to one cell type
+df_merge_sub = subset(test3, cluster_id == "ncMono")
+#df_merge_sub = df_merge_sub[,c(3,88:91)]
+
+# paired t test
+stat.test <- pairwise_t_test(markoi1 ~ condition, data = df_merge_sub, paired = TRUE, p.adjust.method = "none") 
+stat.test
+```
+
+```{r}
+#narrow down to the test that should be displayed
+stat.test_sub = stat.test[c(1,16),]
+stat.test_sub
+```
+
+```{r, fig.width=5, fig.height=1.5}
+g2 = ggplot(df_merge_sub, aes(x = condition, y = markoi1, group = cluster_id)) +
+  stat_summary(fun=median, geom="line", size = 1.5, alpha = 0.7, color = "black") +
+  stat_summary(fun=median, geom="line", size = 1.1, alpha = 1, color = scCol[3]) +
+  geom_point(fill = scCol[3], size = 1, alpha = 0.6, color = "black", shape =21) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5)) + 
+  expand_limits(y=c(0, max(df_merge_sub$markoi1)+0.2)) +
+  stat_pvalue_manual(stat.test_sub, label = "p.adj.signif", y.position = c(max(df_merge_sub$markoi1)+0.1, max(df_merge_sub$markoi1)+0.1)) +
+  ggtitle("ncMono") +
+  #ylab("% of PBMCs") +
+  theme_minimal(base_size = 14) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+g2
+```
+
+
+```{r}
+#first subset to one cell type
+df_merge_sub = subset(test3, cluster_id == "intMono")
+#df_merge_sub = df_merge_sub[,c(3,88:91)]
+
+# paired t test
+stat.test <- pairwise_t_test(markoi1 ~ condition, data = df_merge_sub, paired = TRUE, p.adjust.method = "none") 
+stat.test
+```
+
+```{r}
+#narrow down to the test that should be displayed
+stat.test_sub = stat.test[c(1,16),]
+stat.test_sub
+```
+
+```{r, fig.width=5, fig.height=1.5}
+g3 = ggplot(df_merge_sub, aes(x = condition, y = markoi1, group = cluster_id)) +
+  stat_summary(fun=median, geom="line", size = 1.5, alpha = 0.7, color = "black") +
+  stat_summary(fun=median, geom="line", size = 1.1, alpha = 1, color = scCol[2]) +
+  geom_point(fill = scCol[2], size = 1, alpha = 0.6, color = "black", shape =21) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5)) + 
+  expand_limits(y=c(0, max(df_merge_sub$markoi1)+0.2)) +
+  stat_pvalue_manual(stat.test_sub, label = "p.adj.signif", y.position = c(max(df_merge_sub$markoi1)+0.1, max(df_merge_sub$markoi1)+0.1)) +
+  ggtitle("intMono") +
+  #ylab("% of PBMCs") +
+  theme_minimal(base_size = 14) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+g3
+```
+
+```{r}
+plot_grid(ncol=3, g1, g2, g3)
+```
+
+Repeat for other markers of interest
+
+
+## “Featureplot” over time for selected markers
+```{r, fig.height=4, fig.width=8}
+up1 = plot_grid(ncol = 1,
+plotDR(sce_mono, dr = "UMAP", color_by = "markoi1", ncol =7, scale = T, facet_by = "condition"),
+plotDR(sce_mono, dr = "UMAP", color_by = "markoi2", ncol =7, scale = T, facet_by = "condition"),
+plotDR(sce_mono, dr = "UMAP", color_by = "markoi3", ncol =7, scale = T, facet_by = "condition")
+)
+up1
+```
+
+```{r, fig.height=4, fig.width=8}
+up2 = plot_grid(ncol = 1,
+plotDR(sce_mono, dr = "UMAP", color_by = "markoi1", ncol =7, scale = F, facet_by = "condition"),
+plotDR(sce_mono, dr = "UMAP", color_by = "markoi2", ncol =7, scale = F, facet_by = "condition"),
+plotDR(sce_mono, dr = "UMAP", color_by = "markoi3", ncol =7, scale = F, facet_by = "condition")
+)
+up2
+```
+
+```{r}
+print(Sys.time())
+```
